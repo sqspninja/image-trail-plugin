@@ -13,6 +13,7 @@ Set `window.IMAGE_TRAIL_CONFIG` before plugin initializes.
 
 ## Public Config Keys
 
+- `debug` (boolean, default `false`)
 - `trailImageWidth` (string or number, default `"15vw"`)
 - `initialActivationDistancePx` (number, default `100`)
 - `spawnDistancePx` (number, default `150`)
@@ -37,7 +38,6 @@ These are intentionally not overridable through `window.IMAGE_TRAIL_CONFIG`:
 - `sourceGridImageSelector: ".gallery-grid img"`
 - `requiredSourceAttr: "data-src"`
 - `startupTimeoutMs: 10000`
-- `debug: true`
 - `hideSourceGallery: true`
 - `sourceHiddenClass: "image-trail-source-hidden"`
 - `enableOnMobile: false`

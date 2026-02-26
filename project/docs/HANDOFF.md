@@ -25,7 +25,7 @@ Reusable Squarespace image-trail runtime that sources from on-page gallery conte
 - Re-init replaces prior runtime controller.
 - Off-screen target unbinds listeners and hides trail nodes.
 - Source gallery visibility follows config policy across active and bail states.
-- Public config is animation-only; selector/safety keys are internal-only.
+- Public config includes motion controls plus `debug`; selector/safety keys remain internal-only.
 
 ## Default Internal Behavior
 - Source gallery is hidden by default.

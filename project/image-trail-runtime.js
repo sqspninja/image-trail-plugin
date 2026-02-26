@@ -11,7 +11,7 @@ const IMAGE_TRAIL_DEFAULTS = {
   // Max time to wait for Squarespace/gallery/runtime readiness before aborting.
   startupTimeoutMs: 10000,
   // Logs setup and runtime details to the browser console.
-  debug: true,
+  debug: false,
   // Keeps source gallery hidden for active and bailed runtime states.
   hideSourceGallery: true,
   // CSS class applied when hiding the source gallery.
@@ -58,6 +58,7 @@ const IMAGE_TRAIL_RESIZE_OBSERVER_WARNING_RE =
 const IMAGE_TRAIL_SIZES =
   "(max-width: 575px) 100vw, (max-width: 767px) 50vw, (max-width: 1099px) 33vw, 25vw";
 const IMAGE_TRAIL_PUBLIC_CONFIG_KEYS = [
+  "debug",
   "trailImageWidth",
   "initialActivationDistancePx",
   "spawnDistancePx",
@@ -79,7 +80,6 @@ const IMAGE_TRAIL_INTERNAL_ONLY_CONFIG_KEYS = new Set([
   "sourceGridImageSelector",
   "requiredSourceAttr",
   "startupTimeoutMs",
-  "debug",
   "hideSourceGallery",
   "sourceHiddenClass",
   "enableOnMobile",
@@ -298,6 +298,7 @@ function validateImageTrailConfigInput(configOrElement) {
   validateOptionalNonEmptyString(configInput, "moveEase", errors);
   validateOptionalNonEmptyString(configInput, "fadeInEase", errors);
   validateOptionalNonEmptyString(configInput, "fadeOutEase", errors);
+  validateOptionalBoolean(configInput, "debug", errors);
 
   validateOptionalNumber(configInput, "initialActivationDistancePx", errors, { min: 1 });
   validateOptionalNumber(configInput, "spawnDistancePx", errors, { min: 1 });
@@ -339,6 +340,16 @@ function validateOptionalNonEmptyString(input, key, errors) {
 
   if (typeof input[key] !== "string" || !input[key].trim()) {
     errors.push(`"${key}" must be a non-empty string.`);
+  }
+}
+
+function validateOptionalBoolean(input, key, errors) {
+  if (!(key in input)) {
+    return;
+  }
+
+  if (typeof input[key] !== "boolean") {
+    errors.push(`"${key}" must be true or false.`);
   }
 }
 
@@ -395,7 +406,7 @@ function normalizeImageTrailConfig(configOrElement) {
     config.requiredSourceAttr = IMAGE_TRAIL_DEFAULTS.requiredSourceAttr;
   }
 
-  config.debug = config.debug !== false;
+  config.debug = normalizeBoolean(config.debug, IMAGE_TRAIL_DEFAULTS.debug);
   config.enableOnMobile = config.enableOnMobile !== false;
   config.enableOnTouch = config.enableOnTouch !== false;
   config.mobileBreakpoint = normalizeNumber(config.mobileBreakpoint, IMAGE_TRAIL_DEFAULTS.mobileBreakpoint, {
@@ -1236,6 +1247,14 @@ function normalizeCssSize(value, fallback) {
   return trimmed || fallback;
 }
 
+function normalizeBoolean(value, fallback) {
+  if (typeof value !== "boolean") {
+    return fallback;
+  }
+
+  return value;
+}
+
 function suppressResizeObserverLoopWarning() {
   if (typeof window === "undefined" || window.__imageTrailResizeObserverWarningSuppressed) {
     return;
@@ -1348,7 +1367,6 @@ function createImageTrailLogger(config) {
   };
 }
 
-console.log("[ImageTrail] Script loaded. Call runImageTrailScripts(...) to initialize.");
 (function autoInitImageTrail() {
   if (typeof window === "undefined") {
     return;
@@ -1359,7 +1377,6 @@ console.log("[ImageTrail] Script loaded. Call runImageTrailScripts(...) to initi
   }
 
   window.__imageTrailAutoInitRan = true;
-  console.log("[ImageTrail] Auto init starting.");
   runImageTrailScripts(window.IMAGE_TRAIL_CONFIG || undefined);
 })();
 /* image trail end */

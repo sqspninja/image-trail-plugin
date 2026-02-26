@@ -2,6 +2,10 @@
 
 ## 2026-02-26
 
+### Logging and Config
+- Moved `debug` to public config with default `false`.
+- Removed unconditional startup `console.log` lines so logs stay quiet unless `debug: true`.
+
 ### Distribution and CDN
 - Added dedicated runtime stylesheet source: `project/image-trail.css`.
 - Updated external install template to load CSS and JS as separate files.

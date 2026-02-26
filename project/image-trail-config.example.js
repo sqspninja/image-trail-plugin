@@ -1,6 +1,7 @@
 // Image Trail public config (optional)
 // Only the keys below are accepted by runtime validation.
 window.IMAGE_TRAIL_CONFIG = {
+  debug: false,
   trailImageWidth: "15vw",
   initialActivationDistancePx: 100,
   spawnDistancePx: 150,
