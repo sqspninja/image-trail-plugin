@@ -3,18 +3,14 @@
 <!-- 1) Define config first so auto-init reads it -->
 <script src="/s/image-trail-config.example.js"></script>
 
-<!-- 2) Runtime dependencies -->
+<!-- 2) Runtime styles -->
+<link rel="stylesheet" href="/s/image-trail.css" />
+
+<!-- 3) Runtime dependencies -->
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.1/dist/gsap.min.js"></script>
 
-<!-- 3) Plugin runtime -->
+<!-- 4) Plugin runtime -->
 <script src="/s/image-trail-runtime.js"></script>
-
-<!-- 4) Add this CSS in Custom CSS (not in code injection) -->
-<!--
-body:not(.sqs-edit-mode-active) #trail-gallery.image-trail-source-hidden {
-  display: none !important;
-}
--->
 
 <!-- Optional inline config variant (instead of separate config file) -->
 <!--

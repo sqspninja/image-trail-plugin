@@ -4,7 +4,7 @@
 - Runtime source: `project/image-trail.js`
 - Runtime distribution: `project/image-trail-runtime.js`
 - One-file snippets: `project/image-trail-snippet.html`, `project/image-trail-snippet-oneline.html`
-- Install artifacts: `project/image-trail-install.example.html`, `project/image-trail-config.example.js`, `project/image-trail-style-oneline.css`, `project/image-trail-styles.less`
+- Install artifacts: `project/image-trail-install.example.html`, `project/image-trail-config.example.js`, `project/image-trail.css`, `project/image-trail-style-oneline.css`, `project/image-trail-styles.less`
 
 ## Architecture Summary
 - Entry point: `runImageTrailScripts(configOrElement)`.

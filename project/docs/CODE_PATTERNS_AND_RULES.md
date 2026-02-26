@@ -63,6 +63,7 @@
 ## Distribution Rules
 - Source of truth: `project/image-trail.js`.
 - Runtime distribution copy: `project/image-trail-runtime.js`.
+- Style source of truth: `project/image-trail.css`.
 - One-file snippet: `project/image-trail-snippet.html`.
 - Oneline runtime/snippet/style are release artifacts, not source.
 - Regenerate artifacts with: `node project/scripts/build-image-trail-artifacts.js`.

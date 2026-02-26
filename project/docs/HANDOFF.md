@@ -6,12 +6,14 @@ Reusable Squarespace image-trail runtime that sources from on-page gallery conte
 ## Source of Truth and Artifacts
 - Source of truth: `project/image-trail.js`
 - Runtime distribution copy: `project/image-trail-runtime.js`
+- Runtime style source: `project/image-trail.css`
 - Config template: `project/image-trail-config.example.js`
 - External install template: `project/image-trail-install.example.html`
+- CDN install template: `project/image-trail-install-cdn.example.html`
 - One-file snippet: `project/image-trail-snippet.html`
 - One-file oneline snippet: `project/image-trail-snippet-oneline.html`
-- Style source: `project/image-trail-styles.less`
 - Oneline style: `project/image-trail-style-oneline.css`
+- Legacy style reference: `project/image-trail-styles.less`
 - Release helper: `project/scripts/build-image-trail-artifacts.js`
 - Quick validation: `project/docs/SMOKE_CHECKLIST.md`
 

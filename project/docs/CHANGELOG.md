@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-02-26
+
+### Distribution and CDN
+- Added dedicated runtime stylesheet source: `project/image-trail.css`.
+- Updated external install template to load CSS and JS as separate files.
+- Added jsDelivr install template with separate CSS/JS links: `project/image-trail-install-cdn.example.html`.
+- Updated release helper script to build oneline CSS from `project/image-trail.css`.
+- Kept one-file oneline snippet/style artifacts synced to new CSS source.
+
 ## 2026-02-25
 
 ### Runtime and Behavior

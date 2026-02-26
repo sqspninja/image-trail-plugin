@@ -25,8 +25,9 @@ Maintain a reusable, config-first trail effect that is safe for production insta
 - Oneline runtime: `project/image-trail-runtime-oneline.js`
 - Optional config example: `project/image-trail-config.example.js`
 - Install example: `project/image-trail-install.example.html`
-- Style source: `project/image-trail-styles.less`
+- Style source: `project/image-trail.css`
 - Oneline style: `project/image-trail-style-oneline.css`
+- Legacy style reference: `project/image-trail-styles.less`
 - Deep code analysis: `project/docs/CODE_ANALYSIS.md`
 - Release helper: `project/scripts/build-image-trail-artifacts.js`
 - Smoke checks: `project/docs/SMOKE_CHECKLIST.md`

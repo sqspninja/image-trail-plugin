@@ -5,12 +5,14 @@ Repeatable install and verification flow for Squarespace header injection.
 
 ## Deployable Files
 - Runtime source copy: `project/image-trail-runtime.js`
+- Runtime style source copy: `project/image-trail.css`
 - Optional config template: `project/image-trail-config.example.js`
 - External install example: `project/image-trail-install.example.html`
+- CDN install example: `project/image-trail-install-cdn.example.html`
 - One-file snippet: `project/image-trail-snippet.html`
 - One-file oneline snippet: `project/image-trail-snippet-oneline.html`
-- Style source: `project/image-trail-styles.less`
 - Oneline style: `project/image-trail-style-oneline.css`
+- Legacy style reference: `project/image-trail-styles.less`
 
 ## Pre-Deploy Checks
 - Regenerate artifacts from source:
@@ -22,9 +24,9 @@ Repeatable install and verification flow for Squarespace header injection.
 
 ## Install Option A: External Files
 1. Upload runtime file to a URL like `/s/image-trail-runtime.js`.
-2. Upload config file based on `image-trail-config.example.js` (for example `/s/image-trail-config.js`).
-3. Paste script tags from `project/image-trail-install.example.html` into Header Code Injection.
-4. Add CSS rule for source hide behavior in Custom CSS.
+2. Upload style file to a URL like `/s/image-trail.css`.
+3. Upload config file based on `image-trail-config.example.js` (for example `/s/image-trail-config.js`).
+4. Paste tags from `project/image-trail-install.example.html` into Header Code Injection.
 5. Save and hard refresh.
 
 ## Install Option B: One-File Snippet
@@ -33,13 +35,8 @@ Repeatable install and verification flow for Squarespace header injection.
 3. Adjust only `window.IMAGE_TRAIL_CONFIG` values as needed.
 4. Save and hard refresh.
 
-## Required CSS Rule
-
-```css
-body:not(.sqs-edit-mode-active) #trail-gallery.image-trail-source-hidden {
-  display: none !important;
-}
-```
+## CSS Note
+- `project/image-trail.css` already contains the editor-safe hide rule for source gallery visibility.
 
 ## Smoke Test
 1. Desktop non-touch above `767px`: trail initializes and follows pointer.

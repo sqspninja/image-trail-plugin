@@ -6,6 +6,7 @@ Set `window.IMAGE_TRAIL_CONFIG` before plugin initializes.
 
 ```html
 <script src="/s/image-trail-config.js"></script>
+<link rel="stylesheet" href="/s/image-trail.css" />
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.1/dist/gsap.min.js"></script>
 <script src="/s/image-trail-runtime.js"></script>
 ```
@@ -60,11 +61,4 @@ These are intentionally not overridable through `window.IMAGE_TRAIL_CONFIG`:
 ## CSS Contract
 
 The runtime toggles class `image-trail-source-hidden` on source gallery section.
-
-Recommended rule:
-
-```css
-body:not(.sqs-edit-mode-active) #trail-gallery.image-trail-source-hidden {
-  display: none !important;
-}
-```
+This rule is already included in `project/image-trail.css`.

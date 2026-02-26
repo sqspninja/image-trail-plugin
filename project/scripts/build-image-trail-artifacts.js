@@ -10,6 +10,7 @@ const paths = {
   runtimeSource: path.join(projectRoot, "image-trail.js"),
   runtimeDist: path.join(projectRoot, "image-trail-runtime.js"),
   runtimeOneline: path.join(projectRoot, "image-trail-runtime-oneline.js"),
+  styleSource: path.join(projectRoot, "image-trail.css"),
   snippet: path.join(projectRoot, "image-trail-snippet.html"),
   snippetOneline: path.join(projectRoot, "image-trail-snippet-oneline.html"),
   styleOneline: path.join(projectRoot, "image-trail-style-oneline.css"),
@@ -44,6 +45,13 @@ function replaceRuntimeBlock(html, runtimeText) {
   return html.replace(RUNTIME_BLOCK_RE, `<script>\n${runtimeText}\n</script>`);
 }
 
+function replaceStyleBlock(html, styleText) {
+  if (!STYLE_BLOCK_RE.test(html)) {
+    throw new Error("Could not find <style> block in snippet.");
+  }
+  return html.replace(STYLE_BLOCK_RE, `<style>\n${styleText}\n</style>`);
+}
+
 function toOnelineJs(runtimeSource) {
   const lines = runtimeSource.split(/\r?\n/);
   const collapsed = lines
@@ -72,16 +80,9 @@ function parseCheck(jsCode, label) {
   }
 }
 
-function extractStyleBlock(html) {
-  const match = html.match(STYLE_BLOCK_RE);
-  if (!match) {
-    throw new Error("Could not find <style> block in snippet.");
-  }
-  return match[1];
-}
-
 function build() {
   const runtimeSource = readFile(paths.runtimeSource);
+  const styleSource = readFile(paths.styleSource);
   assertRuntimeMarkers(runtimeSource);
   parseCheck(runtimeSource, "Runtime source");
 
@@ -100,15 +101,17 @@ function build() {
 
   // 4) Update oneline snippet with oneline runtime.
   const snippetOnelineHtml = readFile(paths.snippetOneline);
-  const updatedSnippetOnelineHtml = replaceRuntimeBlock(snippetOnelineHtml, runtimeOneline);
-  writeFile(paths.snippetOneline, updatedSnippetOnelineHtml);
+  const snippetWithOnelineRuntime = replaceRuntimeBlock(snippetOnelineHtml, runtimeOneline);
 
-  // 5) Build oneline CSS from oneline snippet style block.
-  const styleFromSnippet = extractStyleBlock(updatedSnippetOnelineHtml);
-  const styleOneline = toOnelineCss(styleFromSnippet);
+  // 5) Build oneline CSS from css source of truth.
+  const styleOneline = toOnelineCss(styleSource);
   writeFile(paths.styleOneline, styleOneline);
 
-  // 6) Keep copy-ready bundle synced to oneline snippet.
+  // 6) Keep oneline snippet style block synced with oneline CSS artifact.
+  const updatedSnippetOnelineHtml = replaceStyleBlock(snippetWithOnelineRuntime, styleOneline);
+  writeFile(paths.snippetOneline, updatedSnippetOnelineHtml);
+
+  // 7) Keep copy-ready bundle synced to oneline snippet.
   writeFile(paths.copyBundle, updatedSnippetOnelineHtml);
 
   console.log("Built image trail artifacts:");
