@@ -1,0 +1,32 @@
+<!-- Image Trail Install Example (external script + separate config) -->
+
+<!-- 1) Define config first so auto-init reads it -->
+<script src="/s/image-trail-config.example.js"></script>
+
+<!-- 2) Runtime dependencies -->
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.1/dist/gsap.min.js"></script>
+
+<!-- 3) Plugin runtime -->
+<script src="/s/image-trail-runtime.js"></script>
+
+<!-- 4) Add this CSS in Custom CSS (not in code injection) -->
+<!--
+body:not(.sqs-edit-mode-active) #trail-gallery.image-trail-source-hidden {
+  display: none !important;
+}
+-->
+
+<!-- Optional inline config variant (instead of separate config file) -->
+<!--
+<script>
+window.IMAGE_TRAIL_CONFIG = {
+  trailImageWidth: "15vw",
+  initialActivationDistancePx: 100,
+  spawnDistancePx: 150,
+  moveDuration: 0.4,
+  fadeInDuration: 0.2,
+  fadeOutDelay: 0.7,
+  fadeOutDuration: 0.3
+};
+</script>
+-->

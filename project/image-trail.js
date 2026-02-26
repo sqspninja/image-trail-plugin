@@ -1,0 +1,1365 @@
+/* image trail start */
+const IMAGE_TRAIL_DEFAULTS = {
+  // Section where the trail animation will be rendered.
+  targetSectionSelector: "#trail-section",
+  // Section that contains the source gallery images to clone into the trail.
+  sourceGallerySelector: "#trail-gallery",
+  // Selector used inside the source gallery to find images, in display order.
+  sourceGridImageSelector: ".gallery-grid img",
+  // Required image attribute used as the canonical asset URL.
+  requiredSourceAttr: "data-src",
+  // Max time to wait for Squarespace/gallery/runtime readiness before aborting.
+  startupTimeoutMs: 10000,
+  // Logs setup and runtime details to the browser console.
+  debug: true,
+  // Keeps source gallery hidden for active and bailed runtime states.
+  hideSourceGallery: true,
+  // CSS class applied when hiding the source gallery.
+  sourceHiddenClass: "image-trail-source-hidden",
+  // If false, disables the trail below the mobile breakpoint.
+  enableOnMobile: false,
+  // If false, disables the trail on touch-capable devices.
+  enableOnTouch: false,
+  // Viewport width cutoff (px) used by enableOnMobile.
+  mobileBreakpoint: 767,
+  // Visual width of each trail image container.
+  trailImageWidth: "15vw",
+  // Mouse movement distance (px) required before the trail starts.
+  initialActivationDistancePx: 100,
+  // Mouse movement distance (px) required between new trail spawns.
+  spawnDistancePx: 150,
+  // Keeps spawning at last known pointer position when events pause (e.g. over iframes).
+  idleSpawnIntervalMs: 220,
+  // Max time to keep idle spawning after pointer events stop (short bridge only).
+  idleSpawnMaxGapMs: 700,
+  // How strongly idle bridging moves toward the cursor each spawn (0-1).
+  idleApproachFactor: 0.6,
+  // How much of the target section must be visible before listeners bind.
+  visibilityThreshold: 0.1,
+  // Motion duration for each image moving to the next position.
+  moveDuration: 0.4,
+  // GSAP ease used for move tween.
+  moveEase: "power3.out",
+  // Fade-in duration when a new trail image appears.
+  fadeInDuration: 0.2,
+  // GSAP ease used for fade-in tween.
+  fadeInEase: "power1.out",
+  // Delay before each image starts fading out.
+  fadeOutDelay: 0.7,
+  // Fade-out duration for each trail image.
+  fadeOutDuration: 0.3,
+  // GSAP ease used for fade-out tween.
+  fadeOutEase: "power2.out"
+};
+
+const IMAGE_TRAIL_RUNTIME_KEY = "__imageTrailRuntimeController";
+const IMAGE_TRAIL_RESIZE_OBSERVER_WARNING_RE =
+  /^ResizeObserver loop (limit exceeded|completed with undelivered notifications)\.?$/i;
+const IMAGE_TRAIL_SIZES =
+  "(max-width: 575px) 100vw, (max-width: 767px) 50vw, (max-width: 1099px) 33vw, 25vw";
+const IMAGE_TRAIL_PUBLIC_CONFIG_KEYS = [
+  "trailImageWidth",
+  "initialActivationDistancePx",
+  "spawnDistancePx",
+  "idleSpawnIntervalMs",
+  "idleSpawnMaxGapMs",
+  "idleApproachFactor",
+  "visibilityThreshold",
+  "moveDuration",
+  "moveEase",
+  "fadeInDuration",
+  "fadeInEase",
+  "fadeOutDelay",
+  "fadeOutDuration",
+  "fadeOutEase"
+];
+const IMAGE_TRAIL_INTERNAL_ONLY_CONFIG_KEYS = new Set([
+  "targetSectionSelector",
+  "sourceGallerySelector",
+  "sourceGridImageSelector",
+  "requiredSourceAttr",
+  "startupTimeoutMs",
+  "debug",
+  "hideSourceGallery",
+  "sourceHiddenClass",
+  "enableOnMobile",
+  "enableOnTouch",
+  "mobileBreakpoint"
+]);
+const IMAGE_TRAIL_ALLOWED_CONFIG_KEYS = new Set([
+  ...IMAGE_TRAIL_PUBLIC_CONFIG_KEYS,
+  "targetSectionElement"
+]);
+
+function runImageTrailScripts(configOrElement) {
+  suppressResizeObserverLoopWarning();
+  const config = normalizeImageTrailConfig(configOrElement);
+  const logger = createImageTrailLogger(config);
+
+  logger.info("runImageTrailScripts called.", {
+    trailImageWidth: config.trailImageWidth,
+    initialActivationDistancePx: config.initialActivationDistancePx,
+    spawnDistancePx: config.spawnDistancePx,
+    idleSpawnIntervalMs: config.idleSpawnIntervalMs,
+    idleSpawnMaxGapMs: config.idleSpawnMaxGapMs,
+    idleApproachFactor: config.idleApproachFactor,
+    visibilityThreshold: config.visibilityThreshold
+  });
+
+  const configValidation = validateImageTrailConfigInput(configOrElement);
+  if (!configValidation.isValid) {
+    logger.error("Config validation failed. Aborting image trail setup.");
+    configValidation.errors.forEach((message) => {
+      logger.error(message);
+    });
+
+    return waitForDomReady(logger).then(() => {
+      syncSourceGalleryVisibilityBySelector(config, logger, "config-validation-failed");
+      return {
+        skipped: true,
+        reason: "config-validation-failed",
+        errors: configValidation.errors
+      };
+    });
+  }
+
+  const runtimeController = createImageTrailRuntimeController(config, logger);
+  if (typeof window !== "undefined") {
+    const existingRuntimeController = window[IMAGE_TRAIL_RUNTIME_KEY];
+    if (existingRuntimeController && typeof existingRuntimeController.destroy === "function") {
+      existingRuntimeController.destroy();
+    }
+    window[IMAGE_TRAIL_RUNTIME_KEY] = runtimeController;
+  }
+
+  return runtimeController.start();
+}
+
+function createImageTrailRuntimeController(config, logger) {
+  let activeSession = null;
+  let resizeListenerBound = false;
+  let resizeFrameScheduled = false;
+  let evaluationInProgress = false;
+  let queuedEvaluation = false;
+  let destroyed = false;
+  let lastEligibilityReason = null;
+
+  const evaluateState = async (trigger) => {
+    if (destroyed) {
+      return null;
+    }
+
+    if (evaluationInProgress) {
+      queuedEvaluation = true;
+      return null;
+    }
+
+    evaluationInProgress = true;
+    try {
+      const eligibility = getImageTrailEligibility(config);
+      const hadActiveSession = !!activeSession;
+
+      if (!eligibility.enabled) {
+        if (activeSession) {
+          logger.info(`Disabling image trail (${eligibility.reason}).`);
+          teardownImageTrailSession(activeSession, config, logger);
+          activeSession = null;
+        } else if (lastEligibilityReason !== eligibility.reason || trigger !== "resize") {
+          logger.info(`Image trail inactive (${eligibility.reason}).`);
+        }
+
+        if (!hadActiveSession && lastEligibilityReason !== eligibility.reason) {
+          syncSourceGalleryVisibilityBySelector(
+            config,
+            logger,
+            `runtime-inactive-${eligibility.reason}`
+          );
+        }
+
+        lastEligibilityReason = eligibility.reason;
+        return { skipped: true, reason: eligibility.reason };
+      }
+
+      if (activeSession) {
+        lastEligibilityReason = "enabled";
+        return activeSession;
+      }
+
+      logger.info(`Enabling image trail (${trigger}).`);
+      const session = await initializeImageTrailSession(config, logger);
+      activeSession = session;
+      lastEligibilityReason = "enabled";
+      return session;
+    } catch (error) {
+      logger.error(error.message, error);
+      if (activeSession) {
+        teardownImageTrailSession(activeSession, config, logger);
+        activeSession = null;
+      }
+      syncSourceGalleryVisibilityBySelector(config, logger, "runtime-error");
+      destroyed = true;
+      unbindResizeListener();
+      return { skipped: true, reason: "runtime-error" };
+    } finally {
+      evaluationInProgress = false;
+      if (queuedEvaluation && !destroyed) {
+        queuedEvaluation = false;
+        void evaluateState("queued");
+      }
+    }
+  };
+
+  const onResize = () => {
+    if (resizeFrameScheduled) {
+      return;
+    }
+
+    resizeFrameScheduled = true;
+    requestAnimationFrame(() => {
+      resizeFrameScheduled = false;
+      void evaluateState("resize");
+    });
+  };
+
+  const bindResizeListener = () => {
+    if (resizeListenerBound) {
+      return;
+    }
+    window.addEventListener("resize", onResize);
+    resizeListenerBound = true;
+  };
+
+  const unbindResizeListener = () => {
+    if (!resizeListenerBound) {
+      return;
+    }
+    window.removeEventListener("resize", onResize);
+    resizeListenerBound = false;
+  };
+
+  const destroy = () => {
+    destroyed = true;
+    unbindResizeListener();
+    if (activeSession) {
+      teardownImageTrailSession(activeSession, config, logger);
+      activeSession = null;
+    }
+  };
+
+  const start = async () => {
+    logger.info("Initializing image trail runtime controller.");
+    try {
+      await waitForDomReady(logger);
+      callSquarespaceReloadIfAvailable(logger);
+      syncSourceGalleryVisibilityBySelector(config, logger, "startup-precheck");
+      await waitForRuntimeDependencies(config, logger);
+
+      if (destroyed) {
+        return null;
+      }
+
+      bindResizeListener();
+      return evaluateState("startup");
+    } catch (error) {
+      logger.error(error.message, error);
+      syncSourceGalleryVisibilityBySelector(config, logger, "startup-error");
+      return { skipped: true, reason: "startup-error" };
+    }
+  };
+
+  return { start, destroy };
+}
+
+function validateImageTrailConfigInput(configOrElement) {
+  if (!configOrElement || isDomElement(configOrElement)) {
+    return { isValid: true, errors: [] };
+  }
+
+  if (typeof configOrElement !== "object" || Array.isArray(configOrElement)) {
+    return {
+      isValid: false,
+      errors: ["Config input must be an object (or DOM element for legacy call style)."]
+    };
+  }
+
+  const configInput = configOrElement;
+  const errors = [];
+
+  Object.keys(configInput).forEach((key) => {
+    if (!IMAGE_TRAIL_ALLOWED_CONFIG_KEYS.has(key)) {
+      if (IMAGE_TRAIL_INTERNAL_ONLY_CONFIG_KEYS.has(key)) {
+        errors.push(`Config key "${key}" is internal-only and cannot be overridden.`);
+      } else {
+        errors.push(`Unknown config key "${key}".`);
+      }
+    }
+  });
+
+  validateOptionalNonEmptyString(configInput, "moveEase", errors);
+  validateOptionalNonEmptyString(configInput, "fadeInEase", errors);
+  validateOptionalNonEmptyString(configInput, "fadeOutEase", errors);
+
+  validateOptionalNumber(configInput, "initialActivationDistancePx", errors, { min: 1 });
+  validateOptionalNumber(configInput, "spawnDistancePx", errors, { min: 1 });
+  validateOptionalNumber(configInput, "idleSpawnIntervalMs", errors, { min: 16 });
+  validateOptionalNumber(configInput, "idleSpawnMaxGapMs", errors, { min: 0 });
+  validateOptionalNumber(configInput, "idleApproachFactor", errors, { min: 0, max: 1 });
+  validateOptionalNumber(configInput, "visibilityThreshold", errors, { min: 0, max: 1 });
+  validateOptionalNumber(configInput, "moveDuration", errors, { min: 0.01 });
+  validateOptionalNumber(configInput, "fadeInDuration", errors, { min: 0 });
+  validateOptionalNumber(configInput, "fadeOutDelay", errors, { min: 0 });
+  validateOptionalNumber(configInput, "fadeOutDuration", errors, { min: 0 });
+  validateOptionalCssSize(configInput, "trailImageWidth", errors);
+
+  if ("targetSectionElement" in configInput && configInput.targetSectionElement != null) {
+    if (!isDomElement(configInput.targetSectionElement)) {
+      errors.push('"targetSectionElement" must be a DOM element when provided.');
+    }
+  }
+
+  if ("spawnDistancePx" in configInput && "initialActivationDistancePx" in configInput) {
+    const spawnDistancePx = Number(configInput.spawnDistancePx);
+    const initialActivationDistancePx = Number(configInput.initialActivationDistancePx);
+    if (
+      Number.isFinite(spawnDistancePx) &&
+      Number.isFinite(initialActivationDistancePx) &&
+      spawnDistancePx < initialActivationDistancePx
+    ) {
+      errors.push('"spawnDistancePx" must be greater than or equal to "initialActivationDistancePx".');
+    }
+  }
+
+  return { isValid: errors.length === 0, errors };
+}
+
+function validateOptionalNonEmptyString(input, key, errors) {
+  if (!(key in input)) {
+    return;
+  }
+
+  if (typeof input[key] !== "string" || !input[key].trim()) {
+    errors.push(`"${key}" must be a non-empty string.`);
+  }
+}
+
+function validateOptionalNumber(input, key, errors, options = {}) {
+  if (!(key in input)) {
+    return;
+  }
+
+  const parsed = Number(input[key]);
+  const min = typeof options.min === "number" ? options.min : Number.NEGATIVE_INFINITY;
+  const max = typeof options.max === "number" ? options.max : Number.POSITIVE_INFINITY;
+
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    errors.push(`"${key}" must be a number in range [${min}, ${max}].`);
+  }
+}
+
+function validateOptionalCssSize(input, key, errors) {
+  if (!(key in input)) {
+    return;
+  }
+
+  const value = input[key];
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) {
+      errors.push(`"${key}" number values must be greater than 0.`);
+    }
+    return;
+  }
+
+  if (typeof value !== "string" || !value.trim()) {
+    errors.push(`"${key}" must be a non-empty CSS size string or positive number.`);
+  }
+}
+
+function normalizeImageTrailConfig(configOrElement) {
+  const config = { ...IMAGE_TRAIL_DEFAULTS };
+
+  if (isDomElement(configOrElement)) {
+    config.targetSectionElement = configOrElement;
+  } else if (configOrElement && typeof configOrElement === "object") {
+    applyPublicConfigOverrides(config, configOrElement);
+  }
+
+  config.startupTimeoutMs = Number.isFinite(Number(config.startupTimeoutMs))
+    ? Number(config.startupTimeoutMs)
+    : IMAGE_TRAIL_DEFAULTS.startupTimeoutMs;
+
+  if (config.startupTimeoutMs <= 0) {
+    config.startupTimeoutMs = IMAGE_TRAIL_DEFAULTS.startupTimeoutMs;
+  }
+
+  if (!config.requiredSourceAttr || typeof config.requiredSourceAttr !== "string") {
+    config.requiredSourceAttr = IMAGE_TRAIL_DEFAULTS.requiredSourceAttr;
+  }
+
+  config.debug = config.debug !== false;
+  config.enableOnMobile = config.enableOnMobile !== false;
+  config.enableOnTouch = config.enableOnTouch !== false;
+  config.mobileBreakpoint = normalizeNumber(config.mobileBreakpoint, IMAGE_TRAIL_DEFAULTS.mobileBreakpoint, {
+    min: 0
+  });
+  config.trailImageWidth = normalizeCssSize(config.trailImageWidth, IMAGE_TRAIL_DEFAULTS.trailImageWidth);
+  config.initialActivationDistancePx = normalizeNumber(
+    config.initialActivationDistancePx,
+    IMAGE_TRAIL_DEFAULTS.initialActivationDistancePx,
+    { min: 1 }
+  );
+  config.spawnDistancePx = normalizeNumber(config.spawnDistancePx, IMAGE_TRAIL_DEFAULTS.spawnDistancePx, {
+    min: 1
+  });
+  if (config.spawnDistancePx < config.initialActivationDistancePx) {
+    config.spawnDistancePx = config.initialActivationDistancePx;
+  }
+  config.idleSpawnIntervalMs = normalizeNumber(
+    config.idleSpawnIntervalMs,
+    IMAGE_TRAIL_DEFAULTS.idleSpawnIntervalMs,
+    { min: 16 }
+  );
+  config.idleSpawnMaxGapMs = normalizeNumber(
+    config.idleSpawnMaxGapMs,
+    IMAGE_TRAIL_DEFAULTS.idleSpawnMaxGapMs,
+    { min: 0 }
+  );
+  config.idleApproachFactor = normalizeNumber(
+    config.idleApproachFactor,
+    IMAGE_TRAIL_DEFAULTS.idleApproachFactor,
+    { min: 0, max: 1 }
+  );
+  config.visibilityThreshold = normalizeNumber(
+    config.visibilityThreshold,
+    IMAGE_TRAIL_DEFAULTS.visibilityThreshold,
+    { min: 0, max: 1 }
+  );
+  config.moveDuration = normalizeNumber(config.moveDuration, IMAGE_TRAIL_DEFAULTS.moveDuration, {
+    min: 0.01
+  });
+  config.moveEase = normalizeString(config.moveEase, IMAGE_TRAIL_DEFAULTS.moveEase);
+  config.fadeInDuration = normalizeNumber(config.fadeInDuration, IMAGE_TRAIL_DEFAULTS.fadeInDuration, {
+    min: 0
+  });
+  config.fadeInEase = normalizeString(config.fadeInEase, IMAGE_TRAIL_DEFAULTS.fadeInEase);
+  config.fadeOutDelay = normalizeNumber(config.fadeOutDelay, IMAGE_TRAIL_DEFAULTS.fadeOutDelay, {
+    min: 0
+  });
+  config.fadeOutDuration = normalizeNumber(
+    config.fadeOutDuration,
+    IMAGE_TRAIL_DEFAULTS.fadeOutDuration,
+    { min: 0 }
+  );
+  config.fadeOutEase = normalizeString(config.fadeOutEase, IMAGE_TRAIL_DEFAULTS.fadeOutEase);
+
+  return config;
+}
+
+function applyPublicConfigOverrides(config, configInput) {
+  IMAGE_TRAIL_PUBLIC_CONFIG_KEYS.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(configInput, key)) {
+      config[key] = configInput[key];
+    }
+  });
+
+  if (
+    Object.prototype.hasOwnProperty.call(configInput, "targetSectionElement") &&
+    isDomElement(configInput.targetSectionElement)
+  ) {
+    config.targetSectionElement = configInput.targetSectionElement;
+  }
+}
+
+async function initializeImageTrailSession(config, logger) {
+  logger.info("Initializing image trail session.");
+  const sourceReady = await waitForSourceGalleryReady(config, logger);
+  logger.info(
+    `Source gallery ready: "${config.sourceGallerySelector}" with ${sourceReady.images.length} image(s).`
+  );
+  const targetSection = resolveTargetSection(config);
+
+  if (!targetSection) {
+    throw new Error(`Missing target section: "${config.targetSectionSelector}".`);
+  }
+  logger.info(`Target section ready: "${config.targetSectionSelector}".`);
+
+  const trailMount = targetSection.querySelector(".fluid-engine");
+  if (!trailMount) {
+    throw new Error(`Missing target ".fluid-engine" inside "${config.targetSectionSelector}".`);
+  }
+  logger.info('Target ".fluid-engine" found.');
+
+  const galleryImages = normalizeSourceImages(sourceReady.images, config.requiredSourceAttr);
+  if (galleryImages.length === 0) {
+    throw new Error("No valid source images found for image trail.");
+  }
+  logger.info(`Normalized ${galleryImages.length} source image(s).`);
+  const dimensionSummary = Array.from(
+    new Set(
+      galleryImages.map((image) =>
+        image.width && image.height ? `${image.width}x${image.height}` : "unknown"
+      )
+    )
+  );
+  logger.info(`Source image dimensions detected: ${dimensionSummary.join(", ")}`);
+
+  logger.info(`Preloading ${galleryImages.length} trail image(s).`);
+  await preloadTrailImages(galleryImages);
+  logger.info("Image preload complete.");
+
+  const trailSetup = setupTrailAnimation(targetSection, trailMount, galleryImages, config, logger);
+  logger.info(
+    `Trail animation setup complete with ${trailSetup.trailImageContainers.length} trail node(s).`
+  );
+
+  applySourceGalleryVisibility(sourceReady.section, config);
+  logger.info(
+    shouldHideSourceGallery(config)
+      ? `Source gallery hidden using class "${config.sourceHiddenClass}" and aria-hidden="true".`
+      : "Source gallery left visible by config."
+  );
+
+  if (typeof eventEmitter === "function") {
+    eventEmitter(
+      "imageTrailSetupComplete",
+      { section: targetSection, galleryImages, trailImages: trailSetup.trailImageContainers },
+      { flag: true }
+    );
+  }
+
+  return {
+    section: targetSection,
+    sourceSection: sourceReady.section,
+    galleryImages,
+    trailImages: trailSetup.trailImageContainers,
+    destroy: trailSetup.destroy
+  };
+}
+
+function getImageTrailEligibility(config) {
+  if (!config.enableOnTouch && isTouchInputDevice()) {
+    return { enabled: false, reason: "touch-disabled" };
+  }
+
+  if (!config.enableOnMobile && isMobileViewport(config.mobileBreakpoint)) {
+    return { enabled: false, reason: "mobile-disabled" };
+  }
+
+  return { enabled: true, reason: "enabled" };
+}
+
+function teardownImageTrailSession(session, config, logger) {
+  if (!session) {
+    return;
+  }
+
+  try {
+    if (typeof session.destroy === "function") {
+      session.destroy();
+    }
+  } catch (error) {
+    logger.error("Failed during image trail session teardown.", error);
+  }
+
+  if (session.sourceSection) {
+    applySourceGalleryVisibility(session.sourceSection, config);
+    logger.info(
+      shouldHideSourceGallery(config)
+        ? "Source gallery kept hidden after teardown."
+        : "Source gallery restored after teardown."
+    );
+  }
+}
+
+async function waitForRuntimeDependencies(config, logger) {
+  const startTime = Date.now();
+  let lastStatusLogAt = 0;
+
+  logger.info(`Waiting for runtime dependencies (timeout ${config.startupTimeoutMs}ms).`);
+
+  while (Date.now() - startTime < config.startupTimeoutMs) {
+    const missingDependencies = getMissingRuntimeDependencies();
+    if (missingDependencies.length === 0) {
+      logger.info("Runtime dependency check passed.");
+      return;
+    }
+
+    if (Date.now() - lastStatusLogAt >= 1000) {
+      logger.info(`Waiting for runtime dependencies: ${missingDependencies.join(", ")}`);
+      lastStatusLogAt = Date.now();
+    }
+
+    await delay(100);
+  }
+
+  const missingDependencies = getMissingRuntimeDependencies();
+  throw new Error(
+    `Timed out after ${config.startupTimeoutMs}ms waiting for runtime dependencies: ${missingDependencies.join(", ")}.`
+  );
+}
+
+function getMissingRuntimeDependencies() {
+  const missingDependencies = [];
+
+  if (typeof gsap === "undefined") {
+    missingDependencies.push("gsap");
+  }
+
+  if (!resolveImageLoader()) {
+    missingDependencies.push("ImageLoader.load");
+  }
+
+  return missingDependencies;
+}
+
+function resolveImageLoader() {
+  if (typeof ImageLoader !== "undefined" && typeof ImageLoader.load === "function") {
+    return ImageLoader;
+  }
+
+  if (
+    typeof window !== "undefined" &&
+    window.Squarespace &&
+    window.Squarespace.ImageLoader &&
+    typeof window.Squarespace.ImageLoader.load === "function"
+  ) {
+    return window.Squarespace.ImageLoader;
+  }
+
+  if (
+    typeof window !== "undefined" &&
+    window.Static &&
+    window.Static.ImageLoader &&
+    typeof window.Static.ImageLoader.load === "function"
+  ) {
+    return window.Static.ImageLoader;
+  }
+
+  return null;
+}
+
+function waitForDomReady(logger) {
+  if (document.readyState !== "loading") {
+    logger.info("DOM already ready.");
+    return Promise.resolve();
+  }
+
+  logger.info("Waiting for DOMContentLoaded.");
+  return new Promise((resolve) => {
+    document.addEventListener(
+      "DOMContentLoaded",
+      () => {
+        logger.info("DOMContentLoaded fired.");
+        resolve();
+      },
+      { once: true }
+    );
+  });
+}
+
+function callSquarespaceReloadIfAvailable(logger) {
+  if (typeof window !== "undefined" && typeof window.reloadSquarespaceScripts === "function") {
+    logger.info("Calling window.reloadSquarespaceScripts() before dependency wait.");
+    try {
+      window.reloadSquarespaceScripts();
+    } catch (error) {
+      logger.info("window.reloadSquarespaceScripts() threw an error; continuing with waits.");
+    }
+  }
+}
+
+function resolveTargetSection(config) {
+  if (isDomElement(config.targetSectionElement)) {
+    return config.targetSectionElement;
+  }
+
+  if (!config.targetSectionSelector) {
+    return null;
+  }
+
+  return document.querySelector(config.targetSectionSelector);
+}
+
+async function waitForSourceGalleryReady(config, logger) {
+  const startTime = Date.now();
+  let lastStatusLogAt = 0;
+
+  logger.info(
+    `Waiting for source gallery "${config.sourceGallerySelector}" and required "${config.requiredSourceAttr}" on "${config.sourceGridImageSelector}".`
+  );
+
+  while (Date.now() - startTime < config.startupTimeoutMs) {
+    const sourceSection = document.querySelector(config.sourceGallerySelector);
+
+    if (sourceSection) {
+      const sourceImages = Array.from(sourceSection.querySelectorAll(config.sourceGridImageSelector));
+      const missingSourceAttrCount = sourceImages.filter(
+        (img) => !hasRequiredSourceAttr(img, config.requiredSourceAttr)
+      ).length;
+
+      if (sourceImages.length > 0 && missingSourceAttrCount === 0) {
+        return { section: sourceSection, images: sourceImages };
+      }
+
+      if (Date.now() - lastStatusLogAt >= 1000) {
+        if (sourceImages.length === 0) {
+          logger.info(
+            `Source section found. Waiting for images matching "${config.sourceGridImageSelector}".`
+          );
+        } else {
+          logger.info(
+            `Source section found with ${sourceImages.length} image(s). Waiting for "${config.requiredSourceAttr}" on all images (${missingSourceAttrCount} missing).`
+          );
+        }
+        lastStatusLogAt = Date.now();
+      }
+    } else if (Date.now() - lastStatusLogAt >= 1000) {
+      logger.info(`Waiting for source gallery section "${config.sourceGallerySelector}".`);
+      lastStatusLogAt = Date.now();
+    }
+
+    await delay(100);
+  }
+
+  const sourceSection = document.querySelector(config.sourceGallerySelector);
+  if (!sourceSection) {
+    throw new Error(
+      `Timed out after ${config.startupTimeoutMs}ms waiting for source gallery section "${config.sourceGallerySelector}".`
+    );
+  }
+
+  const sourceImages = Array.from(sourceSection.querySelectorAll(config.sourceGridImageSelector));
+  if (sourceImages.length === 0) {
+    throw new Error(
+      `Timed out after ${config.startupTimeoutMs}ms waiting for source gallery images in "${config.sourceGallerySelector}".`
+    );
+  }
+
+  const missingSourceAttrCount = sourceImages.filter(
+    (img) => !hasRequiredSourceAttr(img, config.requiredSourceAttr)
+  ).length;
+
+  if (missingSourceAttrCount > 0) {
+    throw new Error(
+      `Missing required "${config.requiredSourceAttr}" on ${missingSourceAttrCount} source image(s) in "${config.sourceGallerySelector}".`
+    );
+  }
+
+  throw new Error("Timed out waiting for source gallery readiness.");
+}
+
+function hasRequiredSourceAttr(imageElement, requiredAttr) {
+  const attrValue = imageElement.getAttribute(requiredAttr);
+  return !!(attrValue && attrValue.trim());
+}
+
+function normalizeSourceImages(sourceImages, requiredSourceAttr) {
+  return sourceImages.map((sourceImage, index) => {
+    const assetUrl = sourceImage.getAttribute(requiredSourceAttr);
+    if (!assetUrl || !assetUrl.trim()) {
+      throw new Error(`Source image at index ${index} is missing required "${requiredSourceAttr}".`);
+    }
+
+    const parsedDimensions = parseDimensions(sourceImage.getAttribute("data-image-dimensions"));
+    const width = parsedDimensions.width || parsePositiveInt(sourceImage.getAttribute("width"));
+    const height = parsedDimensions.height || parsePositiveInt(sourceImage.getAttribute("height"));
+
+    return {
+      assetUrl: assetUrl.trim(),
+      width,
+      height,
+      srcset: sourceImage.getAttribute("srcset") || "",
+      sizes: sourceImage.getAttribute("sizes") || "",
+      focalPoint: sourceImage.getAttribute("data-image-focal-point") || "",
+      alt: sourceImage.getAttribute("alt") || ""
+    };
+  });
+}
+
+function parseDimensions(dimensionsValue) {
+  if (!dimensionsValue || typeof dimensionsValue !== "string") {
+    return { width: null, height: null };
+  }
+
+  const match = dimensionsValue.trim().match(/^(\d+)x(\d+)$/i);
+  if (!match) {
+    return { width: null, height: null };
+  }
+
+  return {
+    width: parsePositiveInt(match[1]),
+    height: parsePositiveInt(match[2])
+  };
+}
+
+function parsePositiveInt(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function preloadTrailImages(galleryImages) {
+  return Promise.all(
+    galleryImages.map(
+      (imageData) =>
+        new Promise((resolve, reject) => {
+          const preloader = new Image();
+          preloader.src = buildFormatUrl(imageData.assetUrl, 300);
+          preloader.onload = resolve;
+          preloader.onerror = () => {
+            reject(new Error(`Failed preloading image: ${imageData.assetUrl}`));
+          };
+        })
+    )
+  );
+}
+
+function setupTrailAnimation(targetSection, trailMount, galleryImages, config, logger) {
+  let trailIndex = 0;
+  let previousPointer = { x: 0, y: 0 };
+  let latestPointer = null;
+  let lastPointerEventAt = 0;
+  let lastIdleSpawnAt = 0;
+  let idleSpawnIntervalId = null;
+  let hasCrossedInitialThreshold = false;
+  let frameScheduled = false;
+  let listenersBound = false;
+  let isDestroyed = false;
+  let previousTrailPosition = { x: 0, y: 0 };
+  let mountBounds = trailMount.getBoundingClientRect();
+  const initialActivationDistanceSquared = config.initialActivationDistancePx * config.initialActivationDistancePx;
+  const spawnDistanceSquared = config.spawnDistancePx * config.spawnDistancePx;
+
+  const trailImageContainers = [];
+  const fragment = document.createDocumentFragment();
+  const resolvedImageLoader = resolveImageLoader();
+  if (!resolvedImageLoader) {
+    throw new Error("Missing required global: ImageLoader.load.");
+  }
+
+  trailMount.querySelectorAll(".trail-image-container").forEach((existingContainer) => {
+    existingContainer.remove();
+  });
+
+  galleryImages.forEach((imageData) => {
+    const container = document.createElement("div");
+    container.classList.add("trail-image-container");
+    container.style.width = config.trailImageWidth;
+    container.style.aspectRatio =
+      imageData.width && imageData.height ? `${imageData.width} / ${imageData.height}` : "1 / 1";
+
+    const image = document.createElement("img");
+    image.setAttribute("data-src", imageData.assetUrl);
+    image.setAttribute("data-image", imageData.assetUrl);
+
+    if (imageData.width && imageData.height) {
+      image.setAttribute("data-image-dimensions", `${imageData.width}x${imageData.height}`);
+      image.setAttribute("width", String(imageData.width));
+      image.setAttribute("height", String(imageData.height));
+    }
+
+    image.setAttribute("data-load", "false");
+    image.setAttribute("elementtiming", "image-hero");
+
+    if (imageData.focalPoint) {
+      image.setAttribute("data-image-focal-point", imageData.focalPoint);
+    }
+
+    if (imageData.alt) {
+      image.setAttribute("alt", imageData.alt);
+    } else {
+      image.setAttribute("alt", "");
+    }
+
+    image.src = buildFormatUrl(imageData.assetUrl, 300);
+    image.srcset = imageData.srcset || buildDefaultSrcset(imageData.assetUrl);
+    image.sizes = imageData.sizes || IMAGE_TRAIL_SIZES;
+    image.classList.add("trail-image");
+    image.style.objectFit = "cover";
+    image.style.objectPosition = "50% 50%";
+    image.style.height = "100%";
+
+    image.onload = () => {
+      container.appendChild(image);
+      resolvedImageLoader.load(image, { load: true });
+    };
+
+    if (image.complete) {
+      image.onload();
+    }
+
+    fragment.appendChild(container);
+    trailImageContainers.push(container);
+  });
+
+  trailMount.appendChild(fragment);
+
+  const onResize = () => {
+    mountBounds = trailMount.getBoundingClientRect();
+  };
+  const onScroll = () => {
+    mountBounds = trailMount.getBoundingClientRect();
+  };
+
+  const spawnTrailImage = (viewX, viewY) => {
+    const trailImageContainer = trailImageContainers[trailIndex];
+    if (!trailImageContainer) {
+      return;
+    }
+
+    gsap.killTweensOf(trailImageContainer, "x,y");
+    gsap.set(trailImageContainer, {
+      opacity: 0,
+      x: `${previousTrailPosition.x}vw`,
+      y: `${previousTrailPosition.y}vh`
+    });
+
+    const trailTimeline = gsap.timeline();
+    trailTimeline
+      .to(trailImageContainer, {
+        x: `${viewX}vw`,
+        y: `${viewY}vh`,
+        duration: config.moveDuration,
+        ease: config.moveEase
+      })
+      .to(
+        trailImageContainer,
+        {
+          opacity: 1,
+          duration: config.fadeInDuration,
+          ease: config.fadeInEase
+        },
+        0
+      )
+      .to(trailImageContainer, {
+        opacity: 0,
+        delay: config.fadeOutDelay,
+        duration: config.fadeOutDuration,
+        ease: config.fadeOutEase,
+        onComplete() {
+          gsap.set(trailImageContainer, { opacity: 0 });
+        }
+      });
+
+    previousTrailPosition = { x: viewX, y: viewY };
+    trailIndex = (trailIndex + 1) % trailImageContainers.length;
+  };
+
+  const spawnFromLatestPointer = (useApproach = false) => {
+    if (!latestPointer) {
+      return;
+    }
+
+    const { width: windowWidth, height: windowHeight } = getViewportDimensions();
+    const targetViewX = (latestPointer.x / windowWidth) * 100;
+    const targetViewY = (latestPointer.y / windowHeight) * 100;
+    let viewX = targetViewX;
+    let viewY = targetViewY;
+
+    if (useApproach && config.idleApproachFactor < 1) {
+      viewX =
+        previousTrailPosition.x + (targetViewX - previousTrailPosition.x) * config.idleApproachFactor;
+      viewY =
+        previousTrailPosition.y + (targetViewY - previousTrailPosition.y) * config.idleApproachFactor;
+    }
+
+    spawnTrailImage(viewX, viewY);
+  };
+
+  const startIdleSpawnLoop = () => {
+    if (idleSpawnIntervalId !== null) {
+      return;
+    }
+
+    idleSpawnIntervalId = window.setInterval(() => {
+      if (document.hidden || !document.hasFocus()) {
+        return;
+      }
+
+      if (!hasCrossedInitialThreshold || !latestPointer) {
+        return;
+      }
+
+      const idleMs = Date.now() - lastPointerEventAt;
+      if (idleMs < config.idleSpawnIntervalMs) {
+        return;
+      }
+
+      if (idleMs > config.idleSpawnMaxGapMs) {
+        return;
+      }
+
+      if (Date.now() - lastIdleSpawnAt < config.idleSpawnIntervalMs) {
+        return;
+      }
+
+      lastIdleSpawnAt = Date.now();
+      spawnFromLatestPointer(true);
+    }, config.idleSpawnIntervalMs);
+  };
+
+  const stopIdleSpawnLoop = () => {
+    if (idleSpawnIntervalId === null) {
+      return;
+    }
+
+    window.clearInterval(idleSpawnIntervalId);
+    idleSpawnIntervalId = null;
+  };
+
+  const bindTrailListeners = () => {
+    if (listenersBound || isDestroyed) {
+      return;
+    }
+
+    listenersBound = true;
+    window.addEventListener("mousemove", onMouseMove, true);
+    window.addEventListener("pointermove", onMouseMove, true);
+    window.addEventListener("resize", onResize);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    startIdleSpawnLoop();
+  };
+
+  const unbindTrailListeners = () => {
+    if (!listenersBound) {
+      return;
+    }
+
+    listenersBound = false;
+    window.removeEventListener("mousemove", onMouseMove, true);
+    window.removeEventListener("pointermove", onMouseMove, true);
+    window.removeEventListener("resize", onResize);
+    window.removeEventListener("scroll", onScroll);
+    stopIdleSpawnLoop();
+  };
+
+  const hideAllTrailImages = () => {
+    trailImageContainers.forEach((container) => {
+      gsap.killTweensOf(container);
+      gsap.set(container, { opacity: 0 });
+    });
+  };
+
+  const onMouseMove = (event) => {
+    if (frameScheduled) {
+      return;
+    }
+
+    frameScheduled = true;
+    requestAnimationFrame(() => {
+      frameScheduled = false;
+      const pointerInsideTrailMount = isPointInsideRect(event.clientX, event.clientY, mountBounds);
+      if (!pointerInsideTrailMount) {
+        return;
+      }
+
+      const { width: windowWidth, height: windowHeight } = getViewportDimensions();
+      const localX = event.clientX - mountBounds.left;
+      const localY = event.clientY - mountBounds.top;
+      lastPointerEventAt = Date.now();
+      lastIdleSpawnAt = 0;
+      latestPointer = { x: localX, y: localY };
+
+      const viewX = (localX / windowWidth) * 100;
+      const viewY = (localY / windowHeight) * 100;
+      const deltaX = localX - previousPointer.x;
+      const deltaY = localY - previousPointer.y;
+      const movementSquared = deltaX * deltaX + deltaY * deltaY;
+
+      if (!hasCrossedInitialThreshold) {
+        if (movementSquared >= initialActivationDistanceSquared) {
+          hasCrossedInitialThreshold = true;
+          previousPointer = { x: localX, y: localY };
+        }
+        return;
+      }
+
+      if (movementSquared < spawnDistanceSquared) {
+        return;
+      }
+
+      previousPointer = { x: localX, y: localY };
+      spawnTrailImage(viewX, viewY);
+    });
+  };
+
+  const visibilityObserver = observeElementVisibilitySafe(
+    targetSection,
+    () => {
+      if (isDestroyed) {
+        return;
+      }
+      logger.info("Target section is visible; binding global trail listeners.");
+      bindTrailListeners();
+    },
+    () => {
+      logger.info("Target section out of view; unbinding global trail listeners.");
+      unbindTrailListeners();
+      hideAllTrailImages();
+    },
+    { threshold: config.visibilityThreshold }
+  );
+
+  const destroy = () => {
+    if (isDestroyed) {
+      return;
+    }
+
+    isDestroyed = true;
+    unbindTrailListeners();
+    hideAllTrailImages();
+
+    if (visibilityObserver && typeof visibilityObserver.disconnect === "function") {
+      visibilityObserver.disconnect();
+    }
+
+    trailImageContainers.forEach((container) => {
+      container.remove();
+    });
+  };
+
+  return { trailImageContainers, destroy };
+}
+
+function hideSourceGallerySection(sourceSection, hiddenClassName) {
+  if (!hiddenClassName) {
+    return;
+  }
+
+  sourceSection.classList.add(hiddenClassName);
+  sourceSection.setAttribute("aria-hidden", "true");
+}
+
+function showSourceGallerySection(sourceSection, hiddenClassName) {
+  if (!sourceSection || !hiddenClassName) {
+    return;
+  }
+
+  sourceSection.classList.remove(hiddenClassName);
+  sourceSection.removeAttribute("aria-hidden");
+}
+
+function shouldHideSourceGallery(config) {
+  return config.hideSourceGallery !== false;
+}
+
+function applySourceGalleryVisibility(sourceSection, config) {
+  if (!sourceSection) {
+    return;
+  }
+
+  if (shouldHideSourceGallery(config)) {
+    hideSourceGallerySection(sourceSection, config.sourceHiddenClass);
+  } else {
+    showSourceGallerySection(sourceSection, config.sourceHiddenClass);
+  }
+}
+
+function syncSourceGalleryVisibilityBySelector(config, logger, reason) {
+  if (!config.sourceGallerySelector) {
+    return false;
+  }
+
+  const sourceSection = document.querySelector(config.sourceGallerySelector);
+  if (!sourceSection) {
+    return false;
+  }
+
+  applySourceGalleryVisibility(sourceSection, config);
+  logger.info(
+    shouldHideSourceGallery(config)
+      ? `Source gallery hidden (${reason}).`
+      : `Source gallery shown (${reason}).`
+  );
+  return true;
+}
+
+function buildFormatUrl(assetUrl, width) {
+  const separator = assetUrl.includes("?") ? "&" : "?";
+  return `${assetUrl}${separator}format=${width}w`;
+}
+
+function buildDefaultSrcset(assetUrl) {
+  return [100, 300, 500, 750, 1000, 1500]
+    .map((width) => `${buildFormatUrl(assetUrl, width)} ${width}w`)
+    .join(", ");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function isDomElement(value) {
+  return !!(value && typeof value === "object" && value.nodeType === 1);
+}
+
+function isPointInsideRect(clientX, clientY, rect) {
+  return (
+    clientX >= rect.left &&
+    clientX <= rect.right &&
+    clientY >= rect.top &&
+    clientY <= rect.bottom
+  );
+}
+
+function normalizeNumber(value, fallback, options = {}) {
+  const parsed = Number(value);
+  const min = typeof options.min === "number" ? options.min : Number.NEGATIVE_INFINITY;
+  const max = typeof options.max === "number" ? options.max : Number.POSITIVE_INFINITY;
+
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function normalizeString(value, fallback) {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  return trimmed || fallback;
+}
+
+function normalizeCssSize(value, fallback) {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return `${value}vw`;
+  }
+
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  return trimmed || fallback;
+}
+
+function suppressResizeObserverLoopWarning() {
+  if (typeof window === "undefined" || window.__imageTrailResizeObserverWarningSuppressed) {
+    return;
+  }
+
+  const suppressor = (event) => {
+    const message = event && typeof event.message === "string" ? event.message : "";
+    if (!IMAGE_TRAIL_RESIZE_OBSERVER_WARNING_RE.test(message)) {
+      return;
+    }
+
+    event.stopImmediatePropagation();
+    if (typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  };
+
+  window.addEventListener("error", suppressor, true);
+  window.__imageTrailResizeObserverWarningSuppressed = true;
+}
+
+function isMobileViewport(breakpoint) {
+  return getViewportDimensions().width <= breakpoint;
+}
+
+function isTouchInputDevice() {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return false;
+  }
+
+  const hasCoarsePointer =
+    typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  const hasTouchPoints = Number(navigator.maxTouchPoints || 0) > 0;
+  const hasTouchEvent = "ontouchstart" in window;
+
+  return hasCoarsePointer || hasTouchPoints || hasTouchEvent;
+}
+
+function getViewportDimensions() {
+  if (
+    typeof SNWindowUtils !== "undefined" &&
+    SNWindowUtils &&
+    typeof SNWindowUtils.getDimensions === "function"
+  ) {
+    return SNWindowUtils.getDimensions();
+  }
+
+  return {
+    width: Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0, 1),
+    height: Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0, 1)
+  };
+}
+
+function observeElementVisibilitySafe(element, onEnter, onExit, options = {}) {
+  // Avoid Squarespace observeElementVisibility wrappers because they can
+  // rely on ResizeObserver and emit noisy loop warnings during scroll/layout.
+  if (typeof IntersectionObserver !== "function") {
+    onEnter(element);
+    return { disconnect() {} };
+  }
+
+  let isVisible = false;
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting === isVisible) {
+          return;
+        }
+        isVisible = entry.isIntersecting;
+        if (isVisible) {
+          onEnter(entry.target);
+        } else {
+          onExit(entry.target);
+        }
+      });
+    },
+    {
+      root: options.root || null,
+      rootMargin: options.rootMargin || "0px",
+      threshold: typeof options.threshold === "number" ? options.threshold : 0.1
+    }
+  );
+
+  observer.observe(element);
+  return observer;
+}
+
+function createImageTrailLogger(config) {
+  const prefix = "[ImageTrail]";
+
+  return {
+    info(message, payload) {
+      if (!config.debug) {
+        return;
+      }
+      if (typeof payload === "undefined") {
+        console.log(`${prefix} ${message}`);
+      } else {
+        console.log(`${prefix} ${message}`, payload);
+      }
+    },
+    error(message, error) {
+      if (error) {
+        console.error(`${prefix} ${message}`, error);
+      } else {
+        console.error(`${prefix} ${message}`);
+      }
+    }
+  };
+}
+
+console.log("[ImageTrail] Script loaded. Call runImageTrailScripts(...) to initialize.");
+(function autoInitImageTrail() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (window.__imageTrailAutoInitRan) {
+    return;
+  }
+
+  window.__imageTrailAutoInitRan = true;
+  console.log("[ImageTrail] Auto init starting.");
+  runImageTrailScripts(window.IMAGE_TRAIL_CONFIG || undefined);
+})();
+/* image trail end */
